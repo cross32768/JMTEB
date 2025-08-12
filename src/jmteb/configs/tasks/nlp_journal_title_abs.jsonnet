@@ -26,6 +26,7 @@
           name: 'nlp_journal_title_abs-corpus',
         },
       },
+      query_prefix: '次の文章に対して、関連する文章を検索してください: ',
     },
   },
 }
