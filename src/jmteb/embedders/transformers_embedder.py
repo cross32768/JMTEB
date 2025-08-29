@@ -46,11 +46,13 @@ class TransformersEmbedder(TextEmbedder):
         else:
             self.model.to(self.device)
         logger.info(f"{self.model.device=}, {torch.cuda.device_count()=}")
-        self.tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(model_name_or_path, **tokenizer_kwargs)
+        # こちらにもtrust_remote_codeが必要だった
+        self.tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True, **tokenizer_kwargs)
 
         self.max_seq_length = getattr(self.model, "max_seq_length", None)
         if max_seq_length:
             self.max_seq_length = max_seq_length
+            self.model.config.max_length = max_seq_length
         self.add_eos = add_eos
         self.truncate_dim = truncate_dim
 
@@ -129,30 +131,48 @@ class TransformersEmbedder(TextEmbedder):
             return res
 
     def _encode_batch(self, text: list[str], prefix: str | None = None) -> torch.Tensor:
-        if prefix:
-            text = [prefix + t for t in text]
+        # sentence embeddingの計算方法を変えて、prefixは別途渡すのでコメントアウトしている
+        # if prefix:
+        #     text = [prefix + t for t in text]
 
         if self.add_eos:
             text = self._add_eos_func(text)
 
-        encoded_input = self.tokenizer(text, padding=True, truncation=True, return_tensors="pt").to(self.model.device)
-        model_output = self.model(**encoded_input)
-        last_hidden_states = model_output["last_hidden_state"]
-        features = {
-            "input_ids": encoded_input["input_ids"],
-            "attention_mask": encoded_input["attention_mask"],
-            "token_embeddings": last_hidden_states,
-        }
-        if "token_type_ids" in encoded_input:
-            features["token_type_ids"] = encoded_input["token_type_ids"]
+        # sentence embeddingsの計算方法を変えたので暫定的にコメントアウトしている
 
-        if prefix:
-            features["prompt_length"] = self.tokenizer([prefix], return_tensors="pt")["input_ids"].shape[-1] - 1
+        # encoded_input = self.tokenizer(text, padding=True, truncation=True, return_tensors="pt").to(self.model.device)
+        # model_output = self.model(**encoded_input)
+        # last_hidden_states = model_output["last_hidden_state"]
+        # features = {
+        #     "input_ids": encoded_input["input_ids"],
+        #     "attention_mask": encoded_input["attention_mask"],
+        #     "token_embeddings": last_hidden_states,
+        # }
+        # if "token_type_ids" in encoded_input:
+        #     features["token_type_ids"] = encoded_input["token_type_ids"]
+
+        # if prefix:
+        #     features["prompt_length"] = self.tokenizer([prefix], return_tensors="pt")["input_ids"].shape[-1] - 1
 
         # TODO: feature["token_weights_sum"]
 
-        with torch.no_grad():
-            sentence_embeddings = self.pooling.forward(features)["sentence_embedding"]
+        # with torch.no_grad():
+        #     sentence_embeddings = self.pooling.forward(features)["sentence_embedding"]
+
+        """
+        PLaMo-Embedding-1Bの推論のための暫定改造
+        https://huggingface.co/pfnet/plamo-embedding-1b の exampleには書いていないが、
+        https://huggingface.co/pfnet/plamo-embedding-1b/blob/main/modeling_plamo.py に
+        実装されているようにencode()関数があって、encode_queryとencode_documentはその薄いラッパーなので、
+        今回はencode()を呼ぶことにする
+        """
+        with torch.inference_mode():
+            sentence_embeddings = self.model.encode(
+                sentences=text,
+                tokenizer=self.tokenizer,
+                instruction="" if prefix is None else prefix  # prefixがNoneの時は空文字列を渡す
+            )
+
         if self.truncate_dim:
             sentence_embeddings = sentence_embeddings[..., : self.truncate_dim]
         if self.normalize_embeddings:
